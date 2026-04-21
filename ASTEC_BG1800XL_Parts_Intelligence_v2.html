@@ -1446,6 +1446,7 @@
         </div>
         <button class="btn btn-green" onclick="showNewItemModal()">＋ Nueva pieza</button>
         <button class="btn btn-blue" onclick="showCSVModal()">⬆ Import ASTEC Quote</button>
+        <button class="btn" onclick="exportExcel()">⬇ Excel</button>
         <button class="btn" onclick="exportCSV()">⬇ CSV</button>
       </div>
       <div class="table-area" id="tableArea">
@@ -1698,38 +1699,55 @@
         if (!secMap[sec].subs[sub]) secMap[sec].subs[sub] = 0;
         secMap[sec].subs[sub]++;
       });
+
       // Apply tree customizations
       const td = S.treeData || {};
       const collapsed = td.collapsed || {};
       const renames = td.renames || {};
-      const nodes = [];
+
+      let topLevel = [];
       const sortedSecs = Object.keys(secMap).sort();
       sortedSecs.forEach(sec => {
-        const secId = 'sec__' + sec;
-        const secNode = {
-          id: secId, label: renames[secId] || sec, type: 'section',
-          filterKey: 'section', filterVal: sec, count: secMap[sec].count,
-          collapsed: !!collapsed[secId], children: [], depth: 0, draggable: true
-        };
-        nodes.push(secNode);
-        if (!secNode.collapsed) {
-          Object.entries(secMap[sec].subs).sort().forEach(([sub, cnt]) => {
-            const subId = 'sub__' + sec + '__' + sub;
-            nodes.push({
-              id: subId, label: renames[subId] || sub, type: 'subunit',
-              filterKey: 'subunit', filterVal: sub, count: cnt,
-              collapsed: false, children: [], depth: 1, draggable: true, parentSec: sec
-            });
-          });
-        }
+        topLevel.push({ id: 'sec__' + sec, type: 'section', secMapData: secMap[sec], secName: sec });
       });
-      // Custom folders
       const customFolders = (td.customFolders || []);
       customFolders.forEach(cf => {
-        nodes.push({
-          id: cf.id, label: cf.label, type: 'custom', count: 0,
-          collapsed: !!collapsed[cf.id], depth: 0, draggable: true, isCustom: true
-        });
+        topLevel.push({ id: cf.id, type: 'custom', cf: cf });
+      });
+
+      const getOrder = id => td.order && td.order.indexOf(id) !== -1 ? td.order.indexOf(id) : 999999;
+      topLevel.sort((a, b) => getOrder(a.id) - getOrder(b.id));
+
+      const nodes = [];
+      topLevel.forEach(item => {
+        if (item.type === 'section') {
+          const sec = item.secName;
+          const secId = item.id;
+          const secNode = {
+            id: secId, label: renames[secId] || sec, type: 'section',
+            filterKey: 'section', filterVal: sec, count: item.secMapData.count,
+            collapsed: !!collapsed[secId], children: [], depth: 0, draggable: true
+          };
+          nodes.push(secNode);
+          if (!secNode.collapsed) {
+            let subs = Object.entries(item.secMapData.subs).sort().map(([sub, cnt]) => {
+              const subId = 'sub__' + sec + '__' + sub;
+              return {
+                id: subId, label: renames[subId] || sub, type: 'subunit',
+                filterKey: 'subunit', filterVal: sub, count: cnt,
+                collapsed: false, children: [], depth: 1, draggable: true, parentSec: sec
+              };
+            });
+            subs.sort((a, b) => getOrder(a.id) - getOrder(b.id));
+            nodes.push(...subs);
+          }
+        } else if (item.type === 'custom') {
+          const cf = item.cf;
+          nodes.push({
+            id: cf.id, label: cf.label, type: 'custom', count: 0,
+            collapsed: !!collapsed[cf.id], depth: 0, draggable: true, isCustom: true
+          });
+        }
       });
       return nodes;
     }
@@ -1947,6 +1965,33 @@
       ['drag-over', 'drag-over-above', 'drag-over-below'].forEach(c =>
         document.querySelectorAll('.' + c).forEach(el => el.classList.remove(c)));
       if (!S.dragNodeId || S.dragNodeId === id) return;
+
+      const dragId = S.dragNodeId;
+      const dropId = id;
+      const pos = S.dragPos;
+
+      if (!S.treeData) S.treeData = {};
+
+      let order = S.treeData.order || [];
+      if (order.length === 0) {
+        order = buildTreeNodes().map(n => n.id);
+      }
+
+      if (!order.includes(dropId)) order.push(dropId);
+      if (!order.includes(dragId)) order.push(dragId);
+
+      order = order.filter(x => x !== dragId);
+
+      let dropIndex = order.indexOf(dropId);
+
+      if (pos === 'above') order.splice(dropIndex, 0, dragId);
+      else if (pos === 'below') order.splice(dropIndex + 1, 0, dragId);
+      else order.splice(dropIndex + 1, 0, dragId); // treated as 'below'
+
+      S.treeData.order = order;
+      saveTree();
+      renderTree();
+
       toast('Reorganización guardada');
       S.dragNodeId = null;
     }
@@ -2229,26 +2274,26 @@
         const matches = getAllParts().filter(p => p.part_code === code);
         if (!matches.length) {
           notFound.push(code);
-          
+
           const desc = S.csvColMap.desc >= 0 ? (row[S.csvColMap.desc] || '').trim() : code;
           const qty = S.csvColMap.qty >= 0 ? (row[S.csvColMap.qty] || '').trim() : '01';
           const quoteNo = S.csvColMap.quote >= 0 ? (row[S.csvColMap.quote] || '').trim() : '';
-          
+
           const item = {
             id: 10000 + S.customItems.length,
             serial: '',
             section: 'Cotización ASTEC',
             subunit: 'Por Definir',
-            subunit_code: '', 
+            subunit_code: '',
             part_no: '*',
-            part_code: code, 
+            part_code: code,
             description: desc,
             qty: qty,
             remarks: quoteNo ? `Cotizacion Astec ${quoteNo}` : 'Cotizacion Astec',
             isCustom: true
           };
           S.customItems.push(item);
-          
+
           const ann = getAnn(code, '');
           ann.status = 'assign';
           ann.supplier = 'ASTEC';
@@ -2391,14 +2436,24 @@
     }
     function showCtxMenu(x, y, items) {
       const menu = document.getElementById('ctxMenu');
-      let h = '';
+      menu.innerHTML = '';
       items.forEach(item => {
-        if (item.div) h += `<div class="ctx-div"></div>`;
-        else h += `<div class="ctx-item ${item.danger ? 'ctx-danger' : ''}" onclick="hideCtxMenu();(${item.fn.toString()})()">
-      <span>${item.icon || ''}</span>${item.label}
-    </div>`;
+        if (item.div) {
+          const div = document.createElement('div');
+          div.className = 'ctx-div';
+          menu.appendChild(div);
+        } else {
+          const div = document.createElement('div');
+          div.className = `ctx-item ${item.danger ? 'ctx-danger' : ''}`;
+          div.innerHTML = `<span>${item.icon || ''}</span>${item.label}`;
+          div.onclick = (e) => {
+            e.stopPropagation();
+            hideCtxMenu();
+            if (item.fn) item.fn();
+          };
+          menu.appendChild(div);
+        }
       });
-      menu.innerHTML = h;
       menu.style.display = 'block';
       menu.style.left = Math.min(x, window.innerWidth - 170) + 'px';
       menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 10) + 'px';
@@ -2426,6 +2481,29 @@
       a.download = `ASTEC_parts_${new Date().toISOString().slice(0, 10)}.csv`;
       a.click(); URL.revokeObjectURL(a.href);
       toast(`CSV exportado: ${filtered.length} piezas`);
+    }
+
+    function exportExcel() {
+      const filtered = getFiltered();
+      const hdr = ['Serial', 'Sección', 'Subunidad', 'Cod Sub', 'Item No', 'Código India', 'Descripción', 'Qty',
+        'Estado OEM', 'Marca OEM', 'Ref OEM', 'Proveedor', 'Precio', 'Moneda', 'Link Foto', 'Notas'];
+      let html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"></head><body><table border="1">';
+      html += '<tr>' + hdr.map(h => `<th style="background:#f3f3f3">${esc(h)}</th>`).join('') + '</tr>';
+      filtered.forEach(p => {
+        const ann = getAnn(p.part_code, p.serial);
+        const row = [p.serial, p.section, p.subunit, p.subunit_code, p.part_no, p.part_code,
+        p.description, p.qty, ann.status, ann.oem_brand, ann.oem_ref, ann.supplier,
+        ann.price, ann.currency || 'USD', ann.photo_url, ann.notes];
+        html += '<tr>' + row.map(v => `<td>${esc(v)}</td>`).join('') + '</tr>';
+      });
+      html += '</table></body></html>';
+
+      const blob = new Blob([html], { type: 'application/vnd.ms-excel' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `ASTEC_parts_${new Date().toISOString().slice(0, 10)}.xls`;
+      a.click(); URL.revokeObjectURL(a.href);
+      toast(`Excel exportado: ${filtered.length} piezas`);
     }
 
     // ═══ FILTERS / CONTROLS ═══════════════════════════
